@@ -1,15 +1,19 @@
 FROM alpine:latest
 
-# 1. 安装基础工具：curl(下载), unzip(解压), lighttpd, procps(pgrep), ca-certificates(SSL支持)
-RUN apk add --no-cache lighttpd curl procps ca-certificates unzip
+# 1. 优先安装基础工具并更新根证书，解决 SSL 连接问题
+RUN apk add --no-cache lighttpd curl procps ca-certificates unzip && \
+    update-ca-certificates
 
-# 2. 自动下载并安装 Xray 二进制文件
-# 自动识别架构 (amd64 或 arm64) 并下载最新版
+# 2. 手动安装 Xray 二进制文件
+# 优化了 ARCH 判断逻辑，并增加 curl 的稳定性参数 (-fsSL)
 RUN set -ex && \
     mkdir -p /usr/bin/xray /etc/xray /var/www/localhost/htdocs && \
     ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then PLAT="64"; else PLAT="arm64-v8a"; fi && \
-    curl -L -H "Cache-Control: no-cache" -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${PLAT}.zip" && \
+    if [ "$ARCH" = "x86_64" ]; then PLAT="64"; \
+    elif [ "$ARCH" = "aarch64" ]; then PLAT="arm64-v8a"; \
+    else PLAT="64"; fi && \
+    curl -fsSL -H "Cache-Control: no-cache" -o /tmp/xray.zip \
+    "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${PLAT}.zip" && \
     unzip /tmp/xray.zip -d /usr/bin/xray && \
     chmod +x /usr/bin/xray/xray && \
     rm /tmp/xray.zip
@@ -22,7 +26,6 @@ RUN echo 'server.modules = ( "mod_access", "mod_accesslog" )' > /etc/lighttpd/li
     echo 'mimetype.assign = ( ".html" => "text/html", ".txt" => "text/plain", ".jpg" => "image/jpeg", ".png" => "image/png" )' >> /etc/lighttpd/lighttpd.conf
 
 # 4. 使用 echo 写入 Xray 配置文件 (43201 端口, VLESS 协议)
-# 注意：这里使用了单引号包裹内容，确保 JSON 内部的双引号不被转义干扰
 RUN echo '{' > /etc/xray/config.json && \
     echo '  "log": { "loglevel": "warning", "maskAddress": "" },' >> /etc/xray/config.json && \
     echo '  "routing": { "domainStrategy": "AsIs", "rules": [ { "type": "field", "inboundTag": ["api"], "outboundTag": "api" } ] },' >> /etc/xray/config.json && \
@@ -36,13 +39,10 @@ RUN echo '{' > /etc/xray/config.json && \
     echo '  "metrics": { "tag": "metrics_out", "listen": "127.0.0.1:11111" }' >> /etc/xray/config.json && \
     echo '}' >> /etc/xray/config.json
 
-# 5. 优化后的 entrypoint.sh 脚本
+# 5. 优化 entrypoint.sh：启动即运行，随后每20秒监控
 RUN echo '#!/bin/sh' > /entrypoint.sh && \
-    echo '# 立即启动服务' >> /entrypoint.sh && \
     echo '/usr/bin/xray/xray run -c /etc/xray/config.json &' >> /entrypoint.sh && \
     echo 'lighttpd -D -f /etc/lighttpd/lighttpd.conf &' >> /entrypoint.sh && \
-    echo '' >> /entrypoint.sh && \
-    echo '# 每20秒检查一次进程' >> /entrypoint.sh && \
     echo 'while true; do' >> /entrypoint.sh && \
     echo '  sleep 20' >> /entrypoint.sh && \
     echo '  pgrep xray > /dev/null || (/usr/bin/xray/xray run -c /etc/xray/config.json &)' >> /entrypoint.sh && \
@@ -51,7 +51,7 @@ RUN echo '#!/bin/sh' > /entrypoint.sh && \
     chmod +x /entrypoint.sh
 
 # 6. 生成测试主页
-RUN echo "Railway Node is Online" > /var/www/localhost/htdocs/index.html
+RUN echo "Railway Service Ready" > /var/www/localhost/htdocs/index.html
 
 # 暴露端口
 EXPOSE 43201 60080
